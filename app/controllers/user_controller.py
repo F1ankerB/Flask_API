@@ -1,71 +1,94 @@
 from flask import Blueprint, request, jsonify, session
-from functools import wraps
-from app.services.user_service import UserService
-from app.validators.user_validator import validate_login_data, validate_registration_data
+from app.models.user import User
+from app import db
+from sqlalchemy import text
 
 user_bp = Blueprint('user', __name__)
 
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return jsonify({
-                'success': False,
-                'message': 'Требуется авторизация'
-            }), 401
-        return f(*args, **kwargs)
-
-    return decorated_function
-
-
-@user_bp.route('/get_users', methods=['GET'])
-def get_users():
-    is_authenticated = 'user_id' in session
-
-    result = UserService.get_users(is_authenticated)
-
-    return jsonify(result)
-
-
-@user_bp.route('/login_user', methods=['POST'])
-@validate_login_data()
-def login_user():
-    data = request.get_json()
-    username = data['username']
-    password = data['password']
-
-    result = UserService.login_user(username, password)
-
-    if result['success']:
-        # Сохранение в сессию
-        session['user_id'] = username
-
-    return jsonify(result)
-
-
 @user_bp.route('/register_user', methods=['POST'])
-@validate_registration_data()
 def register_user():
-    data = request.get_json()
+    data = request.json
+    
+    username = data.get('username')
+    password = data.get('password')
+    gender = data.get('gender')
+    birth_date = data.get('birth_date')
+    full_name = data.get('full_name')
+    
+    if not username or not password:
+        return jsonify({'success': False, 'message': 'Требуется логин и пароль'}), 400
+        
+    existing_user = User.query.filter_by(username=username).first()
+    if existing_user:
+        return jsonify({'success': False, 'message': 'Пользователь с таким именем уже существует'}), 400
+        
+    user = User(username=username, password=password, gender=gender, 
+                birth_date=birth_date, full_name=full_name)
+    db.session.add(user)
+    db.session.commit()
+    
+    return jsonify({'success': True, 'message': 'Пользователь успешно зарегистрирован'})
 
-    username = data['username']
-    password = data['password']
-    gender = data['gender']
-    birth_date = data['birth_date']
-    full_name = data['full_name']
-
-    result = UserService.register_user(
-        username, password, gender, birth_date, full_name
-    )
-
-    return jsonify(result)
-
+@user_bp.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    
+    username = data.get('username')
+    password = data.get('password')
+    
+    if not username or not password:
+        return jsonify({'success': False, 'message': 'Требуется логин и пароль'}), 400
+    
+    user = User.query.filter_by(username=username).first()
+    if not user:
+        return jsonify({'success': False, 'message': 'Пользователь не найден'}), 401
+        
+    if not user.check_password(password):
+        return jsonify({'success': False, 'message': 'Неверный пароль'}), 401
+    
+    session['user_id'] = user.id
+    session['logged_in'] = True
+    
+    return jsonify({'success': True, 'message': 'Авторизация успешна'})
 
 @user_bp.route('/logout', methods=['POST'])
 def logout():
     session.pop('user_id', None)
+    session.pop('logged_in', None)
+    
+    return jsonify({'success': True, 'message': 'Выход успешно выполнен'})
+
+@user_bp.route('/get_users', methods=['GET'])
+def get_users():
+    is_authenticated = 'logged_in' in session and session['logged_in']
+    users = User.query.all()
+    
+    if is_authenticated:
+        result = [{
+            'username': user.username, 
+            'full_name': user.full_name,
+            'gender': user.gender,
+            'birth_date': user.birth_date
+        } for user in users]
+    else:
+        result = [{'username': user.username} for user in users]
+    
     return jsonify({
         'success': True,
-        'message': 'Выход выполнен успешно'
+        'users': result
     })
+
+@user_bp.route('/db_test', methods=['GET'])
+def db_test():
+    try:
+        result = db.session.execute(text('SELECT 1')).fetchone()
+        databases = db.session.execute(text('SHOW DATABASES')).fetchall()
+        
+        return jsonify({
+            "status": "ok", 
+            "connected": True, 
+            "result": str(result),
+            "databases": [db[0] for db in databases]
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
